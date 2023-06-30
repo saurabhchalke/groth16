@@ -43,6 +43,8 @@ where
     return res;
 }
 
+/// This is a trait that represents a constraint system that
+/// can be converted into a QAP instance.
 pub trait R1CStoQAPTrait {
     /// Computes a QAP instance corresponding to the R1CS instance defined by
     /// `cs`.
