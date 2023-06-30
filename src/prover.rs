@@ -1,12 +1,11 @@
-use crate::{r1cs_to_qap::R1CStoQAP, Proof, ProvingKey, VerifyingKey};
+use crate::{r1cs_to_qap::{R1CStoQAP, R1CStoQAPTrait}, Proof, ProvingKey, VerifyingKey};
 use ark_ec::{msm::VariableBaseMSM, AffineCurve, PairingEngine, ProjectiveCurve};
 use ark_ff::{Field, PrimeField, UniformRand, Zero};
 use ark_poly::GeneralEvaluationDomain;
 use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystem, OptimizationGoal, Result as R1CSResult,
+    ConstraintSynthesizer, ConstraintSystem, OptimizationGoal, Result as R1CSResult, ConstraintMatrices,
 };
-use ark_std::rand::Rng;
-use ark_std::{cfg_into_iter, cfg_iter, vec::Vec};
+use ark_std::{cfg_into_iter, cfg_iter, rand::Rng, vec::Vec};
 
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
@@ -28,6 +27,145 @@ where
     let s = E::Fr::rand(rng);
 
     create_proof::<E, C>(circuit, pk, r, s)
+}
+
+/// Just the same function as `create_random_proof` but with a different name.
+#[inline]
+pub fn create_random_proof_with_reduction<E, C, R>(
+    circuit: C,
+    pk: &ProvingKey<E>,
+    rng: &mut R,
+) -> R1CSResult<Proof<E>>
+where
+    E: PairingEngine,
+    C: ConstraintSynthesizer<E::Fr>,
+    R: Rng,
+{
+    create_random_proof::<E, C, R>(circuit, pk, rng)
+}
+
+type D<F> = GeneralEvaluationDomain<F>;
+
+/// Create a Groth16 proof using randomness `r` and `s` and
+/// the provided R1CS-to-QAP reduction, using the provided
+/// R1CS constraint matrices.
+#[inline]
+pub fn create_proof_with_reduction_and_matrices<E, QAP>(
+    pk: &ProvingKey<E>,
+    r: E::Fr,
+    s: E::Fr,
+    matrices: &ConstraintMatrices<E::Fr>,
+    num_inputs: usize,
+    num_constraints: usize,
+    full_assignment: &[E::Fr],
+) -> R1CSResult<Proof<E>>
+where
+    E: PairingEngine,
+    QAP: R1CStoQAPTrait,
+{
+    let prover_time = start_timer!(|| "Groth16::Prover");
+    let witness_map_time = start_timer!(|| "R1CS to QAP witness map");
+    let h = QAP::witness_map_from_matrices::<E::Fr, D<E::Fr>>(
+        matrices,
+        num_inputs,
+        num_constraints,
+        full_assignment,
+    )?;
+    end_timer!(witness_map_time);
+    let input_assignment = &full_assignment[1..num_inputs];
+    let aux_assignment = &full_assignment[num_inputs..];
+    let proof =
+        create_proof_with_assignment::<E, QAP>(pk, r, s, &h, input_assignment, aux_assignment)?;
+    end_timer!(prover_time);
+
+    Ok(proof)
+}
+
+#[inline]
+fn create_proof_with_assignment<E, QAP>(
+    pk: &ProvingKey<E>,
+    r: E::Fr,
+    s: E::Fr,
+    h: &[E::Fr],
+    input_assignment: &[E::Fr],
+    aux_assignment: &[E::Fr],
+) -> R1CSResult<Proof<E>>
+where
+    E: PairingEngine,
+    QAP: R1CStoQAPTrait,
+{
+    let c_acc_time = start_timer!(|| "Compute C");
+    let h_assignment = cfg_into_iter!(h).map(|s| s.into_repr()).collect::<Vec<_>>();
+    let h_acc = VariableBaseMSM::multi_scalar_mul(&pk.h_query, &h_assignment);
+    drop(h_assignment);
+
+    // Compute C
+    let aux_assignment = cfg_iter!(aux_assignment)
+        .map(|s| s.into_repr())
+        .collect::<Vec<_>>();
+
+    let l_aux_acc = VariableBaseMSM::multi_scalar_mul(&pk.l_query, &aux_assignment);
+
+    let r_s_delta_g1 = pk
+        .delta_g1
+        .into_projective()
+        .mul(&r.into_repr())
+        .mul(&s.into_repr());
+
+    end_timer!(c_acc_time);
+
+    let input_assignment = input_assignment
+        .iter()
+        .map(|s| s.into_repr())
+        .collect::<Vec<_>>();
+
+    let assignment = [&input_assignment[..], &aux_assignment[..]].concat();
+    drop(aux_assignment);
+
+    // Compute A
+    let a_acc_time = start_timer!(|| "Compute A");
+    let r_g1 = pk.delta_g1.mul(r);
+
+    let g_a = calculate_coeff(r_g1, &pk.a_query, pk.vk.alpha_g1, &assignment);
+
+    let s_g_a = g_a.mul(&s.into_repr());
+    end_timer!(a_acc_time);
+
+    // Compute B in G1 if needed
+    let g1_b = if !r.is_zero() {
+        let b_g1_acc_time = start_timer!(|| "Compute B in G1");
+        let s_g1 = pk.delta_g1.mul(s);
+        let g1_b = calculate_coeff(s_g1, &pk.b_g1_query, pk.beta_g1, &assignment);
+
+        end_timer!(b_g1_acc_time);
+
+        g1_b
+    } else {
+        E::G1Projective::zero()
+    };
+
+    // Compute B in G2
+    let b_g2_acc_time = start_timer!(|| "Compute B in G2");
+    let s_g2 = pk.vk.delta_g2.mul(s);
+    let g2_b = calculate_coeff(s_g2, &pk.b_g2_query, pk.vk.beta_g2, &assignment);
+    let r_g1_b = g1_b.mul(&r.into_repr());
+    drop(assignment);
+
+    end_timer!(b_g2_acc_time);
+
+    let c_time = start_timer!(|| "Finish C");
+    let mut g_c = s_g_a;
+    g_c += &r_g1_b;
+    g_c -= &r_s_delta_g1;
+    g_c += &l_aux_acc;
+    g_c += &h_acc;
+    end_timer!(c_time);
+
+    Ok(Proof {
+        a: g_a.into_affine(),
+        b: g2_b.into_affine(),
+        c: g_c.into_affine(),
+    })
 }
 
 /// Create a Groth16 proof that is *not* zero-knowledge.
@@ -149,16 +287,17 @@ where
     })
 }
 
-/// Given a Groth16 proof, returns a fresh proof of the same statement. For a proof π of a
-/// statement S, the output of the non-deterministic procedure `rerandomize_proof(π)` is
-/// statistically indistinguishable from a fresh honest proof of S. For more info, see theorem 3 of
-/// [\[BKSV20\]](https://eprint.iacr.org/2020/811)
+/// Given a Groth16 proof, returns a fresh proof of the same statement. For a
+/// proof π of a statement S, the output of the non-deterministic procedure
+/// `rerandomize_proof(π)` is statistically indistinguishable from a fresh
+/// honest proof of S. For more info, see theorem 3 of [\[BKSV20\]](https://eprint.iacr.org/2020/811)
 pub fn rerandomize_proof<E, R>(rng: &mut R, vk: &VerifyingKey<E>, proof: &Proof<E>) -> Proof<E>
 where
     E: PairingEngine,
     R: Rng,
 {
-    // These are our rerandomization factors. They must be nonzero and uniformly sampled.
+    // These are our rerandomization factors. They must be nonzero and uniformly
+    // sampled.
     let (mut r1, mut r2) = (E::Fr::zero(), E::Fr::zero());
     while r1.is_zero() || r2.is_zero() {
         r1 = E::Fr::rand(rng);

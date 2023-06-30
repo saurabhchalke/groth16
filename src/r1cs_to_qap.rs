@@ -3,7 +3,9 @@ use ark_poly::EvaluationDomain;
 use ark_std::{cfg_iter, cfg_iter_mut, vec};
 
 use crate::Vec;
-use ark_relations::r1cs::{ConstraintSystemRef, Result as R1CSResult, SynthesisError};
+use ark_relations::r1cs::{
+    ConstraintMatrices, ConstraintSystemRef, Result as R1CSResult, SynthesisError,
+};
 use core::ops::{AddAssign, Deref};
 
 #[cfg(feature = "parallel")]
@@ -41,12 +43,66 @@ where
     return res;
 }
 
+pub trait R1CStoQAPTrait {
+    /// Computes a QAP instance corresponding to the R1CS instance defined by
+    /// `cs`.
+    fn instance_map_with_evaluation<F: PrimeField, D: EvaluationDomain<F>>(
+        cs: ConstraintSystemRef<F>,
+        t: &F,
+    ) -> Result<(Vec<F>, Vec<F>, Vec<F>, F, usize, usize), SynthesisError>;
+
+    #[inline]
+    /// Computes a QAP witness corresponding to the R1CS witness defined by
+    /// `cs`.
+    fn witness_map<F: PrimeField, D: EvaluationDomain<F>>(
+        prover: ConstraintSystemRef<F>,
+    ) -> Result<Vec<F>, SynthesisError> {
+        let matrices = prover.to_matrices().unwrap();
+        let num_inputs = prover.num_instance_variables();
+        let num_constraints = prover.num_constraints();
+
+        let cs = prover.borrow().unwrap();
+        let prover = cs.deref();
+
+        let full_assignment = [
+            prover.instance_assignment.as_slice(),
+            prover.witness_assignment.as_slice(),
+        ]
+        .concat();
+
+        Self::witness_map_from_matrices::<F, D>(
+            &matrices,
+            num_inputs,
+            num_constraints,
+            &full_assignment,
+        )
+    }
+
+    /// Computes a QAP witness corresponding to the R1CS witness defined by
+    /// `cs`.
+    fn witness_map_from_matrices<F: PrimeField, D: EvaluationDomain<F>>(
+        matrices: &ConstraintMatrices<F>,
+        num_inputs: usize,
+        num_constraints: usize,
+        full_assignment: &[F],
+    ) -> R1CSResult<Vec<F>>;
+
+    /// Computes the exponents that the generator uses to calculate base
+    /// elements which the prover later uses to compute `h(x)t(x)/delta`.
+    fn h_query_scalars<F: PrimeField, D: EvaluationDomain<F>>(
+        max_power: usize,
+        t: F,
+        zt: F,
+        delta_inverse: F,
+    ) -> Result<Vec<F>, SynthesisError>;
+}
+
 pub(crate) struct R1CStoQAP;
 
-impl R1CStoQAP {
+impl R1CStoQAPTrait for R1CStoQAP {
     #[inline]
     #[allow(clippy::type_complexity)]
-    pub(crate) fn instance_map_with_evaluation<F: PrimeField, D: EvaluationDomain<F>>(
+    fn instance_map_with_evaluation<F: PrimeField, D: EvaluationDomain<F>>(
         cs: ConstraintSystemRef<F>,
         t: &F,
     ) -> R1CSResult<(Vec<F>, Vec<F>, Vec<F>, F, usize, usize)> {
@@ -91,7 +147,7 @@ impl R1CStoQAP {
     }
 
     #[inline]
-    pub(crate) fn witness_map<F: PrimeField, D: EvaluationDomain<F>>(
+    fn witness_map<F: PrimeField, D: EvaluationDomain<F>>(
         prover: ConstraintSystemRef<F>,
     ) -> R1CSResult<Vec<F>> {
         let matrices = prover.to_matrices().unwrap();
@@ -157,5 +213,76 @@ impl R1CStoQAP {
         domain.coset_ifft_in_place(&mut ab);
 
         Ok(ab)
+    }
+
+    fn witness_map_from_matrices<F: PrimeField, D: EvaluationDomain<F>>(
+        matrices: &ConstraintMatrices<F>,
+        num_inputs: usize,
+        num_constraints: usize,
+        full_assignment: &[F],
+    ) -> R1CSResult<Vec<F>> {
+        let domain =
+            D::new(num_constraints + num_inputs).ok_or(SynthesisError::PolynomialDegreeTooLarge)?;
+        let domain_size = domain.size();
+        let zero = F::zero();
+
+        let mut a = vec![zero; domain_size];
+        let mut b = vec![zero; domain_size];
+
+        cfg_iter_mut!(a[..num_constraints])
+            .zip(cfg_iter_mut!(b[..num_constraints]))
+            .zip(cfg_iter!(&matrices.a))
+            .zip(cfg_iter!(&matrices.b))
+            .for_each(|(((a, b), at_i), bt_i)| {
+                *a = evaluate_constraint(&at_i, &full_assignment);
+                *b = evaluate_constraint(&bt_i, &full_assignment);
+            });
+
+        {
+            let start = num_constraints;
+            let end = start + num_inputs;
+            a[start..end].clone_from_slice(&full_assignment[..num_inputs]);
+        }
+
+        domain.ifft_in_place(&mut a);
+        domain.ifft_in_place(&mut b);
+
+        domain.coset_fft_in_place(&mut a);
+        domain.coset_fft_in_place(&mut b);
+
+        let mut ab = domain.mul_polynomials_in_evaluation_domain(&a, &b);
+        drop(a);
+        drop(b);
+
+        let mut c = vec![zero; domain_size];
+        cfg_iter_mut!(c[..num_constraints])
+            .enumerate()
+            .for_each(|(i, c)| {
+                *c = evaluate_constraint(&matrices.c[i], &full_assignment);
+            });
+
+        domain.ifft_in_place(&mut c);
+        domain.coset_fft_in_place(&mut c);
+
+        cfg_iter_mut!(ab)
+            .zip(c)
+            .for_each(|(ab_i, c_i)| *ab_i -= &c_i);
+
+        domain.divide_by_vanishing_poly_on_coset_in_place(&mut ab);
+        domain.coset_ifft_in_place(&mut ab);
+
+        Ok(ab)
+    }
+
+    fn h_query_scalars<F: PrimeField, D: EvaluationDomain<F>>(
+        max_power: usize,
+        t: F,
+        zt: F,
+        delta_inverse: F,
+    ) -> Result<Vec<F>, SynthesisError> {
+        let scalars = cfg_into_iter!(0..max_power)
+            .map(|i| zt * &delta_inverse * &t.pow([i as u64]))
+            .collect::<Vec<_>>();
+        Ok(scalars)
     }
 }

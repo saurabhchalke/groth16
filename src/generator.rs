@@ -1,4 +1,4 @@
-use crate::{r1cs_to_qap::R1CStoQAP, ProvingKey, Vec, VerifyingKey};
+use crate::{r1cs_to_qap::R1CStoQAP, ProvingKey, Vec, VerifyingKey, r1cs_to_qap::R1CStoQAPTrait};
 use ark_ec::{msm::FixedBaseMSM, PairingEngine, ProjectiveCurve};
 use ark_ff::{Field, PrimeField, UniformRand, Zero};
 use ark_poly::{EvaluationDomain, GeneralEvaluationDomain};
