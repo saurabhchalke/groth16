@@ -11,8 +11,9 @@ use core::ops::{AddAssign, Deref};
 #[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
+/// This method evaluates a constraint system instance at a given point.
 #[inline]
-fn evaluate_constraint<'a, LHS, RHS, R>(terms: &'a [(LHS, usize)], assignment: &'a [RHS]) -> R
+pub fn evaluate_constraint<'a, LHS, RHS, R>(terms: &'a [(LHS, usize)], assignment: &'a [RHS]) -> R
 where
     LHS: One + Send + Sync + PartialEq,
     RHS: Send + Sync + core::ops::Mul<&'a LHS, Output = RHS> + Copy,
@@ -99,7 +100,9 @@ pub trait R1CStoQAPTrait {
     ) -> Result<Vec<F>, SynthesisError>;
 }
 
-pub(crate) struct R1CStoQAP;
+/// This is a struct that represents a constraint system that
+/// can be converted into a QAP instance.
+pub struct R1CStoQAP;
 
 impl R1CStoQAPTrait for R1CStoQAP {
     #[inline]
