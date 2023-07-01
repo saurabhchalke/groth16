@@ -1,9 +1,13 @@
-use crate::{r1cs_to_qap::{R1CStoQAP, R1CStoQAPTrait}, Proof, ProvingKey, VerifyingKey};
+use crate::{
+    r1cs_to_qap::{R1CStoQAP, R1CStoQAPTrait},
+    Proof, ProvingKey, VerifyingKey,
+};
 use ark_ec::{msm::VariableBaseMSM, AffineCurve, PairingEngine, ProjectiveCurve};
 use ark_ff::{Field, PrimeField, UniformRand, Zero};
 use ark_poly::GeneralEvaluationDomain;
 use ark_relations::r1cs::{
-    ConstraintSynthesizer, ConstraintSystem, OptimizationGoal, Result as R1CSResult, ConstraintMatrices,
+    ConstraintMatrices, ConstraintSynthesizer, ConstraintSystem, OptimizationGoal,
+    Result as R1CSResult,
 };
 use ark_std::{cfg_into_iter, cfg_iter, rand::Rng, vec::Vec};
 
@@ -224,7 +228,11 @@ where
 
     let l_aux_acc = VariableBaseMSM::multi_scalar_mul(&pk.l_query, &aux_assignment);
 
-    let r_s_delta_g1 = pk.delta_g1.into_projective().mul(r.into()).mul(s.into());
+    let r_s_delta_g1 = pk
+        .delta_g1
+        .into_projective()
+        .mul(&r.into_repr())
+        .mul(&s.into_repr());
 
     end_timer!(c_acc_time);
 
@@ -245,7 +253,7 @@ where
 
     let g_a = calculate_coeff(r_g1, &pk.a_query, pk.vk.alpha_g1, &assignment);
 
-    let s_g_a = g_a.mul(s.into());
+    let s_g_a = g_a.mul(&s.into_repr());
     end_timer!(a_acc_time);
 
     // Compute B in G1 if needed
@@ -265,7 +273,7 @@ where
     let b_g2_acc_time = start_timer!(|| "Compute B in G2");
     let s_g2 = pk.vk.delta_g2.mul(s);
     let g2_b = calculate_coeff(s_g2, &pk.b_g2_query, pk.vk.beta_g2, &assignment);
-    let r_g1_b = g1_b.mul(r.into());
+    let r_g1_b = g1_b.mul(&r.into_repr());
     drop(assignment);
 
     end_timer!(b_g2_acc_time);
