@@ -33,9 +33,11 @@ where
     create_proof::<E, C>(circuit, pk, r, s)
 }
 
-/// Just the same function as `create_random_proof` but with a different name.
+/// Create a Groth16 proof that is zero-knowledge using the provided
+/// R1CS-to-QAP reduction.
+/// This method samples randomness for zero knowledges via `rng`.
 #[inline]
-pub fn create_random_proof_with_reduction<E, C, R>(
+pub fn create_random_proof_with_reduction<E, C, R, QAP>(
     circuit: C,
     pk: &ProvingKey<E>,
     rng: &mut R,
@@ -44,8 +46,12 @@ where
     E: PairingEngine,
     C: ConstraintSynthesizer<E::Fr>,
     R: Rng,
+    QAP: R1CStoQAPTrait,
 {
-    create_random_proof::<E, C, R>(circuit, pk, rng)
+    let r = E::Fr::rand(rng);
+    let s = E::Fr::rand(rng);
+
+    create_proof_with_reduction::<E, C, QAP>(circuit, pk, r, s)
 }
 
 type D<F> = GeneralEvaluationDomain<F>;
@@ -298,7 +304,7 @@ where
 /// Create a Groth16 proof using randomness `r` and `s` and the provided
 /// R1CS-to-QAP reduction.
 #[inline]
-pub fn create_proof_with_reduction<E, C, R, QAP>(
+pub fn create_proof_with_reduction<E, C, QAP>(
     circuit: C,
     pk: &ProvingKey<E>,
     r: E::Fr,
@@ -307,7 +313,6 @@ pub fn create_proof_with_reduction<E, C, R, QAP>(
 where
     E: PairingEngine,
     C: ConstraintSynthesizer<E::Fr>,
-    R: Rng,
     QAP: R1CStoQAPTrait,
 {
     let prover_time = start_timer!(|| "Groth16::Prover");
