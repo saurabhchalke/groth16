@@ -295,6 +295,56 @@ where
     })
 }
 
+/// Create a Groth16 proof using randomness `r` and `s` and the provided
+/// R1CS-to-QAP reduction.
+#[inline]
+pub fn create_proof_with_reduction<E, C, R, QAP>(
+    circuit: C,
+    pk: &ProvingKey<E>,
+    r: E::Fr,
+    s: E::Fr,
+) -> R1CSResult<Proof<E>>
+where
+    E: PairingEngine,
+    C: ConstraintSynthesizer<E::Fr>,
+    R: Rng,
+    QAP: R1CStoQAPTrait,
+{
+    let prover_time = start_timer!(|| "Groth16::Prover");
+    let cs = ConstraintSystem::new_ref();
+
+    // Set the optimization goal
+    cs.set_optimization_goal(OptimizationGoal::Constraints);
+
+    // Synthesize the circuit.
+    let synthesis_time = start_timer!(|| "Constraint synthesis");
+    circuit.generate_constraints(cs.clone())?;
+    debug_assert!(cs.is_satisfied().unwrap());
+    end_timer!(synthesis_time);
+
+    let lc_time = start_timer!(|| "Inlining LCs");
+    cs.finalize();
+    end_timer!(lc_time);
+
+    let witness_map_time = start_timer!(|| "R1CS to QAP witness map");
+    let h = QAP::witness_map::<E::Fr, D<E::Fr>>(cs.clone())?;
+    end_timer!(witness_map_time);
+
+    let prover = cs.borrow().unwrap();
+    let proof = create_proof_with_assignment::<E, QAP>(
+        pk,
+        r,
+        s,
+        &h,
+        &prover.instance_assignment[1..],
+        &prover.witness_assignment,
+    )?;
+
+    end_timer!(prover_time);
+
+    Ok(proof)
+}
+
 /// Given a Groth16 proof, returns a fresh proof of the same statement. For a
 /// proof π of a statement S, the output of the non-deterministic procedure
 /// `rerandomize_proof(π)` is statistically indistinguishable from a fresh
